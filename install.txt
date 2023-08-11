@@ -1,0 +1,334 @@
+基于centos7.4安装k8s集群
+
+1、虚拟机准备
+
+1.1 升级linux内核
+https://developer.aliyun.com/article/1070461#:~:text=kubernetes
+https://blog.csdn.net/alwaysbefine/article/details/108931626?spm=a2c6h.12873639.article-detail.135.1e0e5fafD3tQzT
+
+使用 yum 升级内核至 5.4.243 版本(2023-05-23)
+    1) 执行命令: yum -y install kernel-lt-5.4.243-1.el7.elrepo.x86_64.rpm
+    2) 打开并编辑 /etc/default/grub 并设置 GRUB_DEFAULT=0
+    3) 执行命令：grub2-mkconfig -o /boot/grub2/grub.cfg
+
+1.2 内核优化
+cat >/etc/modules-load.d/k8s.conf <<EOF
+# Load some kernel modules needed by kubernetes at boot
+ip_vs
+ip_vs_lc
+ip_vs_wlc
+ip_vs_rr
+ip_vs_wrr
+ip_vs_lblc
+ip_vs_lblcr
+ip_vs_dh
+ip_vs_sh
+ip_vs_fo
+ip_vs_nq
+ip_vs_sed
+ip_vs_ftp
+ip_vs_sh
+nf_conntrack
+ip_tables
+ip_set
+xt_set
+ipt_set
+ipt_rpfilter
+ipt_REJECT
+ipip
+overlay
+br_netfilter
+EOF
+
+cat >/etc/sysctl.d/k8s.conf <<EOF
+net.ipv4.ip_forward=1
+net.bridge.bridge-nf-call-iptables=1
+net.bridge.bridge-nf-call-ip6tables=1
+fs.inotify.max_user_watches=525000
+#fs.may_detach_mounts = 1
+net.ipv4.conf.all.route_localnet = 1
+vm.overcommit_memory=1
+vm.panic_on_oom=0
+fs.file-max=52706963
+fs.nr_open=52706963
+net.netfilter.nf_conntrack_max=2310720
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.tcp_keepalive_intvl =15
+net.ipv4.tcp_max_tw_buckets = 36000
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_orphans = 327680
+net.ipv4.tcp_orphan_retries = 3
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 16384
+#net.ipv4.ip_conntrack_max = 65536
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_timestamps = 0
+net.core.somaxconn = 16384
+EOF
+
+上面修改的两个文件及时生效:
+systemctl enable --now systemd-modules-load.service
+sysctl -p
+
+1.3 编译升级iptables
+https://developer.aliyun.com/article/1070447?spm=a2c6h.24874632.expert-profile.205.60c014b32StM99
+
+1) yum装包:
+    yum -y install gcc make libnftnl-devel libmnl-devel autoconf automake libtool bison flex  libnetfilter_conntrack-devel libnetfilter_queue-devel libpcap-devel
+
+2) iptables依赖libmnl, libnftnl
+    编译libmnl
+        yum -y install lbzip2
+        tar -xf libmnl-1.0.5.tar.bz2
+        cd libmnl-1.0.5
+        ./configure
+        make && make install
+    编译libnftnl, 依赖libmnl
+        export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig/
+        tar -xf libnftnl-1.2.5.tar.xz
+        cd libnftnl-1.2.5
+        ./configure
+        make && make install
+    编译iptables, cp文件
+        tar -xf iptables-1.8.9.tar.xz
+        cd iptables-1.8.9
+        ./configure
+        make && make install
+        /usr/bin/cp /usr/local/sbin/{iptables,iptables-restore,iptables-save} /sbin/
+
+1.4 虚拟机初始化
+systemctl stop firewalld
+systemctl disable firewalld
+
+setenforce 0
+sed -ri 's#^(SELINUX=).*$#\1disabled#g' /etc/selinux/config
+
+sed -ri 's#^UseDNS.*$#UseDNS no#g' /etc/ssh/sshd_config
+sed -ri 's#^GSSAPIAuthentication.*$#GSSAPIAuthentication no#g' /etc/ssh/sshd_config
+systemctl restart sshd
+
+systemctl stop NetworkManager
+systemctl disable NetworkManager
+
+systemctl stop postfix
+systemctl disable postfix
+
+yum -y install vim bash-completion telnet tcpdump zip unzip wget net-tools ipvsadm ipset
+
+1.5 关闭交换分区
+sed -i '/swap/ s/^/#/' /etc/fstab
+swapoff -a
+
+1.6 时间同步
+
+
+
+2、
+2.1 准备开始
+    1）一台兼容的 Linux 主机。Kubernetes 项目为基于 Debian 和 Red Hat 的 Linux 发行版以及一些不提供包管理器的发行版提供通用的指令。
+    2）每台机器 2 GB 或更多的 RAM（如果少于这个数字将会影响你应用的运行内存）。
+    3）CPU 2 核心及以上。
+    4）集群中的所有机器的网络彼此均能相互连接（公网和内网都可以）。
+    5）节点之中不可以有重复的主机名、MAC 地址或 product_uuid。请参见这里了解更多详细信息。
+    6）开启机器上的某些端口。请参见这里了解更多详细信息。
+    7）禁用交换分区。为了保证 kubelet 正常工作，你必须禁用交换分区。
+
+2.2 修改主机名，在hosts中添加映射
+!!!修改主机名非常重要
+
+2.3 使用 ip a 命令检查网卡的MAC地址
+可以使用 sudo cat /sys/class/dmi/id/product_uuid 命令对 product_uuid 校验
+
+
+
+3、
+3.1 安装docker
+如果有必要，将docker的数据目录设置到别的目录，例如: /docker/，不使用默认的 /var/lib/docker/
+
+3.2
+docker 默认将iptables的FORWARD chain改为DROP，需要添加以下配置解决
+sed -i '/ExecReload/i\ExecStartPost=/bin/sh -c "while ! iptables -nL DOCKER >/dev/null 2>&1 ; do sleep 1; done ; iptables -P FORWARD ACCEPT"' /usr/lib/systemd/system/docker.service
+
+3.3
+然后将Docker的Cgroup Driver设置为systemd，并设置docker仓库
+
+cat >/etc/docker/daemon.json <<EOF
+{
+    "exec-opts": ["native.cgroupdriver=systemd"],
+    "registry-mirrors": ["http://szzs.io"],
+    "insecure-registries": ["szzs.io"]
+}
+EOF
+
+systemctl daemon-reload
+systemctl enable docker
+systemctl restart docker
+
+
+
+4、使用kubeadm安装k8s
+4.1
+所有节点导入images下的所有docker镜像，镜像tag不正确需要修改
+镜像列表应该如下：
+registry.k8s.io/kube-apiserver:v1.27.0
+registry.k8s.io/kube-controller-manager:v1.27.0
+registry.k8s.io/kube-scheduler:v1.27.0
+registry.k8s.io/kube-proxy:v1.27.0
+flannel/flannel:v0.21.4
+registry.k8s.io/coredns/coredns:v1.10.1
+registry.k8s.io/etcd:3.5.7-0
+flannel/flannel-cni-plugin:v1.1.2
+registry.k8s.io/pause:3.9
+
+4.2
+所有节点安装kubeadm、kubelet、kubectl
+
+整合kubelet和cri-docker
+
+sed -ri 's#^ExecStart=.*$#ExecStart=/usr/bin/cri-dockerd --container-runtime-endpoint fd:// --pod-infra-container-image=registry.k8s.io/pause:3.9 --network-plugin=cni --cni-bin-dir=/opt/cni/bin --cni-cache-dir=/var/lib/cni/cache --cni-conf-dir=/etc/cni/net.d#g' /usr/lib/systemd/system/cri-docker.service
+systemctl daemon-reload
+systemctl restart cri-docker
+systemctl enable cri-docker
+
+cat >/etc/sysconfig/kubelet <<EOF
+KUBELET_KUBEADM_ARGS="--cgroup-driver=systemd --pod-infra-container-image=registry.k8s.io/pause:3.9 --container-runtime-endpoint=unix:///run/cri-dockerd.sock"
+EOF
+
+systemctl daemon-reload
+systemctl restart kubelet
+systemctl enable kubelet
+
+4.3
+master节点
+
+4.3.1
+# 旧方式：使用命令
+# kubeadm init --kubernetes-version=1.27.0 --cri-socket=unix:///run/cri-dockerd.sock --config config.yaml
+
+使用init-config.yaml初始化k8s集群
+kubeadm init --config init-config.yaml
+
+4.3.2
+修改 /etc/kubernetes/manifests/kube-apiserver.yaml 文件，新增内容
+--service-node-port-range=80-65535
+保存后，稍等10秒左右会自动生效
+
+4.3.3
+要使非 root 用户可以运行 kubectl，请运行以下命令， 它们也是 kubeadm init 输出的一部分：
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+或者，如果你是 root 用户，则可以运行：
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+4.4
+slave节点
+
+kubeadm join --token <token> <control-plane-host>:<control-plane-port> --discovery-token-ca-cert-hash sha256:<hash> --cri-socket=unix:///run/cri-dockerd.sock
+
+如果没有令牌，可以通过在控制平面节点上运行以下命令来获取令牌：
+kubeadm token list
+
+如果你没有 --discovery-token-ca-cert-hash 的值，则可以通过在控制平面节点上执行以下命令链来获取它：
+openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'
+
+4.4.1
+如果后期想要扩展k8s的slave节点
+
+首先在master节点执行命令创建token
+kubeadm token create ghjdef.9123456780ghjdef
+
+然后在slave节点上
+kubeadm join --token <token> <control-plane-host>:<control-plane-port> --discovery-token-ca-cert-hash sha256:<hash> --cri-socket=unix:///run/cri-dockerd.sock
+
+例如:
+kubeadm join --token ghjdef.9123456780ghjdef 10.153.61.36:6443 --discovery-token-ca-cert-hash sha256:7a72842fe01e78623e3a5982ade4613cb7b63faf0bad16f01ba97156310356e2 --cri-socket=unix:///run/cri-dockerd.sock
+
+4.5
+删除节点情况
+
+使用适当的凭证与控制平面节点通信，运行：(master节点)
+kubectl drain <node name> --delete-emptydir-data --force --ignore-daemonsets
+
+在删除节点之前，请重置 kubeadm 安装的状态：(slave节点)
+kubeadm reset
+
+重置过程不会重置或清除 iptables 规则或 IPVS 表。如果你希望重置 iptables，则必须手动进行：(slave节点)
+iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+
+如果要重置 IPVS 表，则必须运行以下命令：(slave节点)
+ipvsadm -C
+
+现在删除节点：(master节点)
+kubectl delete node <节点名称>
+
+4.6
+安装flannel网络
+flannel/flannel:v0.21.4
+flannel/flannel-cni-plugin:v1.1.2
+所有节点上需要保证导入上面两个flannel镜像
+
+在master节点上执行命令
+kubectl apply -f kube-flannel.yml
+
+需要注意:
+    1）flannel中的Network需要与kube init --pod-network-cidr的值保持一致
+    2）containers的args里面添加 --iface=eth0 网卡需要按实际情况修改
+
+4.7
+CoreDNS 性能优化：https://imroc.cc/kubernetes/best-practices/dns/optimize-coredns-performance.html
+
+4.7.1
+kubectl -n kube-system edit configmap coredns
+
+1）加上 autopath @kubernetes
+2）默认的 pods insecure 改成 pods verified
+3）禁用 ipv6
+template IN AAAA .
+#template ANY AAAA {
+#    rcode NXDOMAIN
+#}
+
+4.7.2
+部署 NodeLocal DNSCache
+kubectl apply -f nodelocaldns.yaml
+
+修改kubelet配置，需要修改以下两个文件
+/etc/kubernetes/kubelet.conf
+/var/lib/kubelet/config.yaml
+修改以下配置
+clusterDNS:
+- 169.254.10.10
+
+systemctl daemon-reload
+systemctl restart kubelet
+
+4.8
+安装metrics-server
+kubectl apply -f high-availability-1.21+.yaml
+
+4.8
+安装dashboard
+
+1) 安装dashboard
+kubectl apply -f dashboard.yaml
+
+2) 创建apisix转发(需要先执行步骤"5" )
+ kubectl apply -f k8s-dashboard-route.yaml
+
+5
+安装apisix ingress
+
+1) 创建命名空间
+kubectl apply -f apisix-ns.yaml
+
+2) 安装etcd集群
+kubectl apply -f etcd.yaml
+
+3) 安装apisix
+kubectl apply -f apisix.yaml
+
+4) 安装apisix-ingress-controller
+kubectl kustomize deploy/ | kubectl apply -f -
